@@ -1,0 +1,75 @@
+name: copy-gate-nightly
+
+# Nightly copy-standard check against the PRIVATE kineticgain-com-apex source.
+# This repo holds ZERO production credentials and ZERO signing keys (see SECURITY.md).
+# Its only secret is APEX_DEPLOY_KEY: a READ-ONLY deploy key on kineticgain-com-apex.
+
+on:
+  schedule:
+    - cron: '23 7 * * *'   # daily 07:23 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write            # to file/update a tracking issue when the gate fails
+
+concurrency:
+  group: copy-gate-nightly
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout@v4 (tag). Hardening TODO: pin to a full commit SHA. The blast
+      # radius here is only a read-only deploy key (no production or signing secrets).
+      - name: Checkout apex source (read-only deploy key)
+        uses: actions/checkout@v4
+        with:
+          repository: mizcausevic-dev/kineticgain-com-apex
+          ref: main
+          ssh-key: ${{ secrets.APEX_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Run copy gate
+        run: |
+          set +e
+          python3 scripts/copy_gate.py --block            > block.txt 2>&1; block=$?
+          python3 scripts/copy_gate.py --explain-residual > resid.txt 2>&1; resid=$?
+          set -e
+          echo "::group::copy_gate --block";            cat block.txt; echo "::endgroup::"
+          echo "::group::copy_gate --explain-residual"; cat resid.txt; echo "::endgroup::"
+          # block: 0 = pass. residual: 0 = pass, 1 = unclassified found, 2 = flag not on
+          # apex main yet (Task 1 / gate/explain-residual unmerged) -> tolerate until merged.
+          fail=0
+          [ "$block" -ne 0 ] && fail=1
+          [ "$resid" -eq 1 ] && fail=1
+          if [ "$resid" -eq 2 ]; then
+            echo "NOTE: --explain-residual is not on apex main yet; skipping it until Task 1 merges."
+          fi
+          {
+            echo "## copy-gate-nightly"
+            echo ""
+            echo "block exit \`$block\` (0=pass) | explain-residual exit \`$resid\` (0=pass, 1=unclassified, 2=flag-not-on-main)"
+            echo ""
+            echo "### --block"; echo '```'; cat block.txt; echo '```'
+            echo ""
+            echo "### --explain-residual"; echo '```'; cat resid.txt; echo '```'
+          } > gate-output.md
+          exit $fail
+
+      - name: File or update tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing=$(gh issue list --repo "${{ github.repository }}" --state open \
+            --search 'in:title copy-gate-nightly failing' --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing on $(date -u +%F). Run: $run_url"
+          else
+            printf '%s\n\nRun: %s\n' "$(cat gate-output.md 2>/dev/null)" "$run_url" \
+              | gh issue create --repo "${{ github.repository }}" \
+                  --title "copy-gate-nightly failing" --body-file -
+          fi
