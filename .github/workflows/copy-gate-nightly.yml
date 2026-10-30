@@ -67,7 +67,7 @@ jobs:
           existing=$(gh issue list --repo "${{ github.repository }}" --state open \
             --search 'in:title copy-gate-nightly failing' --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Still failing on $(date -u +%F). Run: $run_url"
+            gh issue comment "$existing" --repo "${{ github.repository }}" --body "Still failing on $(date -u +%F). Run: $run_url"
           else
             printf '%s\n\nRun: %s\n' "$(cat gate-output.md 2>/dev/null)" "$run_url" \
               | gh issue create --repo "${{ github.repository }}" \
